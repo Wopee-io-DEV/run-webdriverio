@@ -1,0 +1,78 @@
+name: 'Run WebdriverIO tests'
+description: 'Runs WebdriverIO tests via npm run test'
+branding:
+  icon: 'fast-forward'
+  color: 'purple'
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/checkout@v4
+
+    - name: Load .github/workflows/.env → $GITHUB_ENV
+      shell: bash
+      run: |
+        if [ -f .github/workflows/.env ]; then
+          grep -vE '^(#|$)' .github/workflows/.env \
+            | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' \
+            >> "$GITHUB_ENV"
+        fi
+        fi
+    
+    - name: set WOPEE_SCREENSHOT_VALIDATION_ENABLED if not set as env variable
+      if: env.WOPEE_SCREENSHOT_VALIDATION_ENABLED == null
+      shell: bash
+      run: |
+        echo 'WOPEE_SCREENSHOT_VALIDATION_ENABLED=true' >> $GITHUB_ENV
+        
+    - name: Run tests
+      shell: bash
+      run: |
+          npm install --prefer-offline --no-audit
+          npm test
+
+    - name: Confirm end of run
+      if: always()
+      shell: bash
+      run: |
+
+        ERROR_FLAG=false
+        if [ "${{ job.status }}" = "failure" ]; then
+          ERROR_FLAG=true
+        fi
+
+        if [ "${{ github.event.action }}" = "code" ]; then
+
+          JSON_PAYLOAD=$(cat <<-EOF
+          {
+            "query": "mutation PostProcessAgentSuite(\$input: PostProcessAgentSuiteInput!) { postProcessAgentSuite(input: \$input) }",
+            "variables": {
+              "input": {
+                "error": $ERROR_FLAG,
+                "projectUuid": "${{ env.WOPEE_PROJECT_UUID }}",
+                "suiteUuid": "${{ env.WOPEE_SUITE_UUID }}",
+                "testCase": {
+                  "testCaseId": "${{ env.WOPEE_TEST_CASE_ID }}",
+                  "userStoryId": "${{ env.WOPEE_USER_STORY_ID }}"
+                }
+              }
+            }
+          }
+        EOF
+          )
+        fi
+
+        curl --request POST \
+          --header 'content-type: application/json' \
+          --header 'api_key: ${{ env.WOPEE_API_KEY }}' \
+          --url '${{ env.WOPEE_API_URL }}' \
+          --data "$JSON_PAYLOAD"
+          
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: webdriverio-results
+        path: |
+          wdio-reports
+        retention-days: 1
