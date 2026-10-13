@@ -4,9 +4,41 @@ branding:
   icon: 'fast-forward'
   color: 'purple'
 
+inputs:
+  project-uuid:
+    description: "Wopee.io project UUID, usually vars.WOPEE_PROJECT_UUID (set by Commander when it creates the repo)"
+    required: false
+    default: ""
+  project-url:
+    description: "App URL the tests open, usually vars.WOPEE_PROJECT_URL"
+    required: false
+    default: ""
+  api-url:
+    description: "Wopee.io API URL, usually vars.WOPEE_API_URL"
+    required: false
+    default: ""
+
 runs:
   using: "composite"
   steps:
+    - name: Load the repository's project settings → $GITHUB_ENV
+      # Written first, so client_payload.env from a Commander dispatch overrides them.
+      shell: bash
+      env:
+        INPUT_PROJECT_UUID: ${{ inputs.project-uuid }}
+        INPUT_PROJECT_URL: ${{ inputs.project-url }}
+        INPUT_API_URL: ${{ inputs.api-url }}
+      run: |
+        set_env() {
+          if [ -n "$2" ]; then
+            echo "$1=$2" >> "$GITHUB_ENV"
+            echo "$1=$2"
+          fi
+        }
+        set_env WOPEE_PROJECT_UUID "$INPUT_PROJECT_UUID"
+        set_env WOPEE_PROJECT_URL "$INPUT_PROJECT_URL"
+        set_env WOPEE_API_URL "$INPUT_API_URL"
+
     - uses: actions/checkout@v4
 
     - name: Set default values for environment variables
@@ -39,49 +71,62 @@ runs:
             >> "$GITHUB_ENV" || true
         fi
 
+    - name: Check project settings
+      shell: bash
+      run: |
+        if [ -z "${WOPEE_PROJECT_UUID:-}" ]; then
+          echo "::error title=WOPEE_PROJECT_UUID is not set::The repository variable WOPEE_PROJECT_UUID is missing (Settings › Secrets and variables › Actions › Variables). Commander sets it when it creates the repo; tests.yml passes it to this action as the project-uuid input."
+          exit 1
+        fi
+
     - name: Run tests
+      id: tests
       shell: bash
       run: |
           npm install --prefer-offline --no-audit
           npm test
 
     - name: Confirm end of run
-      if: always()
+      if: always() && github.event.action == 'code'
       shell: bash
       run: |
+        if [ -z "${WOPEE_SUITE_UUID:-}" ]; then
+          echo "No WOPEE_SUITE_UUID - nothing to confirm"
+          exit 0
+        fi
 
         ERROR_FLAG=false
-        if [ "${{ job.status }}" = "failure" ]; then
+        if [ "${{ steps.tests.outcome }}" != "success" ]; then
           ERROR_FLAG=true
         fi
 
-        if [ "${{ github.event.action }}" = "code" ]; then
+        IDENTIFIER=""
+        if [ -n "${WOPEE_USER_STORY_ID:-}" ] && [ -n "${WOPEE_TEST_CASE_ID:-}" ]; then
+          IDENTIFIER="${WOPEE_USER_STORY_ID}:${WOPEE_TEST_CASE_ID}"
+        fi
 
-          JSON_PAYLOAD=$(cat <<-EOF
-          {
-            "query": "mutation PostProcessAgentSuite(\$input: PostProcessAgentSuiteInput!) { postProcessAgentSuite(input: \$input) }",
-            "variables": {
-              "input": {
-                "error": $ERROR_FLAG,
-                "projectUuid": "${{ env.WOPEE_PROJECT_UUID }}",
-                "suiteUuid": "${{ env.WOPEE_SUITE_UUID }}",
-                "testCase": {
-                  "testCaseId": "${{ env.WOPEE_TEST_CASE_ID }}",
-                  "userStoryId": "${{ env.WOPEE_USER_STORY_ID }}"
-                }
-              }
+        JSON_PAYLOAD=$(cat <<-EOF
+        {
+          "query": "mutation PostProcessAgentSuite(\$input: PostProcessAgentSuiteInput!) { postProcessAgentSuite(input: \$input) { postProcessing errorMessage } }",
+          "variables": {
+            "input": {
+              "error": $ERROR_FLAG,
+              "projectUuid": "${WOPEE_PROJECT_UUID}",
+              "suiteUuid": "${WOPEE_SUITE_UUID}",
+              "identifier": "$IDENTIFIER"
             }
           }
+        }
         EOF
-          )
-        fi
+        )
 
         curl --request POST \
           --header 'content-type: application/json' \
-          --header 'api_key: ${{ env.WOPEE_API_KEY }}' \
-          --url '${{ env.WOPEE_API_URL }}' \
+          --header "api_key: ${WOPEE_API_KEY}" \
+          --header "x-api-key: ${WOPEE_API_KEY}" \
+          --url "${WOPEE_API_URL}" \
           --data "$JSON_PAYLOAD"
-          
+
     - name: Upload test results
       if: always()
       uses: actions/upload-artifact@v4
@@ -89,4 +134,5 @@ runs:
         name: webdriverio-results
         path: |
           wdio-reports
+        if-no-files-found: ignore
         retention-days: 1
