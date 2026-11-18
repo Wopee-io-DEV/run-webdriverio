@@ -19,13 +19,31 @@ runs:
       if: github.event.client_payload.env
       shell: bash
       run: |
+        # Mask secret-looking values BEFORE they enter $GITHUB_ENV: from there every later
+        # step prints them in its `env:` header. Commander project variables such as
+        # KERBEROS_PASSWORD or BASIC_AUTH_PASSWORD arrive here as plain strings; only the
+        # repo secret WOPEE_API_KEY was masked by GitHub. Multi-line values line by line.
         jq -r '
           .client_payload.env
           | to_entries[]
           | select(.value != null)
-          | if (.value | type=="string" and test("\n"))
-              then "\(.key)<<EOF\n\(.value)\nEOF"
-              else "\(.key)=\(.value)"
+          | select(.key | ascii_upcase | test("PASS|PWD|SECRET|TOKEN|CREDENTIAL|PRIVATE|KEYTAB|_KEY$"))
+          | (.value | tostring | split("\n")[] | select(length > 0))
+          | "::add-mask::\(.)"
+        ' "$GITHUB_EVENT_PATH"
+        # Ordinary names only, and none that steer the runner or the agent's connections. The
+        # delimiter is random so that no value can end its own entry.
+        DELIMITER="WOPEE_$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+        jq -r --arg delimiter "$DELIMITER" '
+          .client_payload.env
+          | to_entries[]
+          | select(.value != null)
+          | select(.key | test("^[A-Za-z_][A-Za-z0-9_]*$"))
+          | select(.key | ascii_upcase | test("^(PATH|HOME|BASH_ENV|ENV|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|WOPEE_API_KEY|WOPEE_AGENT_WORK_DIR|WOPEE_AGENT_REPORT|WOPEE_DIAG_WEBHOOK_URL|WOPEE_CDP_ENDPOINT|WOPEE_CHROME_CDP_URL|AGENT_KEY|BROWSER_WSS_ENDPOINT)$|^(GITHUB|RUNNER|ACTIONS|NODE|LD|DYLD|NPM_CONFIG|SSL|CURL|GIT|LANGFUSE|UPSTREAM)_|^AGENT_.*(URL|ENDPOINT|KEY|SECRET|TOKEN|PROVIDER|CLIENT|PROJECT|LOCATION|RESOURCE)") | not)
+          | (.value | tostring) as $value
+          | if ($value | test("[\r\n]"))
+              then "\(.key)<<\($delimiter)\n\($value)\n\($delimiter)"
+              else "\(.key)=\($value)"
             end
         ' "$GITHUB_EVENT_PATH" >> "$GITHUB_ENV"
 
